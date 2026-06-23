@@ -24,13 +24,13 @@ COINS = [
 ]
 
 STARTING_BALANCE   = 135.0   # Virtual wallet in USDT
-TRADE_SIZE         = 40.0    # Capital per trade in USDT
-TAKE_PROFIT_PCT    = 0.008   # 0.8% TP
+TRADE_SIZE         = 120.0   # Capital per trade in USDT
+TAKE_PROFIT_PCT    = 0.005   # 0.5% TP
 STOP_LOSS_PCT      = 0.004   # 0.4% SL
-TRAIL_TRIGGER_PCT  = 0.005   # 0.5% — once hit, trailing stop activates
-TRAIL_STOP_PCT     = 0.005   # trail stop locks in at 0.5% profit
+TRAIL_TRIGGER_PCT  = 0.003   # 0.3% — trailing stop activates here
+TRAIL_STOP_PCT     = 0.003   # trail locks in 0.3% profit floor
 FEE_PCT            = 0.001   # 0.1% per side (Binance taker)
-MAX_POSITIONS      = 3       # max simultaneous open trades
+MAX_POSITIONS      = 1       # single position only
 
 LOG_FILE = "trades_log.csv"
 

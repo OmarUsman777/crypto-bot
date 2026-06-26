@@ -26,7 +26,7 @@ init(autoreset=True)
 
 STRATEGY_NAME   = "MultiCoin Scoring"
 SCAN_INTERVAL   = 60        # seconds between scans
-MIN_SCORE       = 9         # need 9/10 to trade
+MIN_SCORE       = 8         # need 8/10 to trade
 RSI_SMA_PERIOD  = 14        # SMA of RSI for crossover detection
 
 # ─────────────────────────────────────────────
@@ -34,25 +34,25 @@ RSI_SMA_PERIOD  = 14        # SMA of RSI for crossover detection
 # ─────────────────────────────────────────────
 def score_coin(symbol):
     """
-    Sideways scalping — max 10 pts, need 9 to trade.
+    Sideways scalping — max 10 pts, need 8 to trade.
 
-    Hard gates (instant disqualify, 0 points):
-      - Price NOT within 0.5% of lower BB  → not at range bottom
-      - 1m RSI >= 40                        → not oversold on entry TF
+    Hard gates (instant disqualify):
+      - Price NOT within 1.5% of lower BB  → not near range bottom
+      - 1m RSI >= 45                        → not oversold enough
 
     Scored conditions:
       +3  1m RSI crosses above its SMA      (momentum turning up)
-      +2  Volume > 1.5x average             (buyers stepping in)
-      +2  MACD histogram flips positive     (momentum confirmation)
-      +2  5m RSI < 45                       (macro still in pullback)
-      +1  BB bandwidth > 0.3%               (enough range to hit 0.5% TP)
+      +2  Volume > 1.3x average             (buyers stepping in)
+      +2  MACD histogram > 0 OR flips pos   (momentum present)
+      +2  5m RSI < 50                       (macro not overbought)
+      +1  BB bandwidth > 0.3%              (enough range for TP)
     """
     import pandas as pd
 
     score  = 0
     detail = {}
 
-    # ── 1-minute data (primary timeframe) ──
+    # ── 1-minute data ──
     df1 = fetch_ohlcv(symbol, "1m", limit=100)
     if df1 is None or len(df1) < 20:
         return 0, {}
@@ -62,33 +62,31 @@ def score_coin(symbol):
     last1 = df1.iloc[-1]
     prev1 = df1.iloc[-2]
 
-    # ── HARD GATE 1: Price must be within 0.5% of lower Bollinger Band ──
     bb_lower  = last1.get("bb_lower")
     bb_upper  = last1.get("bb_upper")
     bb_middle = last1.get("bb_middle")
     close     = last1["close"]
 
+    # ── HARD GATE 1: Price within 1.5% of lower BB ──
     if not pd.notna(bb_lower) or not pd.notna(bb_upper) or bb_lower <= 0:
         detail["bb_gate"] = "FAIL (BB not ready)"
         return 0, detail
 
     dist_from_lower = (close - bb_lower) / close
-    if dist_from_lower > 0.005:
-        detail["bb_gate"] = f"FAIL (price {dist_from_lower*100:.2f}% above lower BB — not at range bottom)"
+    if dist_from_lower > 0.015:
+        detail["bb_gate"] = f"FAIL (price {dist_from_lower*100:.2f}% above lower BB — need <1.5%)"
         return 0, detail
-    detail["bb_gate"] = f"PASS (price {dist_from_lower*100:.2f}% from lower BB ✔)"
+    detail["bb_gate"] = f"PASS ({dist_from_lower*100:.2f}% from lower BB ✔)"
 
-    # ── HARD GATE 2: 1m RSI must be below 40 ──
+    # ── HARD GATE 2: 1m RSI < 45 ──
     rsi1 = last1.get("rsi")
     if not pd.notna(rsi1):
         detail["rsi_gate"] = "FAIL (RSI not ready)"
         return 0, detail
-    if rsi1 >= 40:
-        detail["rsi_gate"] = f"FAIL (1m RSI={rsi1:.1f} ≥ 40 — not oversold)"
+    if rsi1 >= 45:
+        detail["rsi_gate"] = f"FAIL (1m RSI={rsi1:.1f} ≥ 45 — not oversold)"
         return 0, detail
-    detail["rsi_gate"] = f"PASS (1m RSI={rsi1:.1f} < 40 ✔)"
-
-    # Both gates passed — now score
+    detail["rsi_gate"] = f"PASS (1m RSI={rsi1:.1f} < 45 ✔)"
 
     # ── +3: 1m RSI crosses above its SMA ──
     rsi1_sma      = last1.get("rsi_sma")
@@ -105,53 +103,53 @@ def score_coin(symbol):
         score += 3
         detail["rsi_cross"] = f"+3 (1m RSI={rsi1:.1f} crossed above SMA={rsi1_sma:.1f} ✔)"
     else:
-        rsi_str  = f"{rsi1:.1f}"      if pd.notna(rsi1)      else "n/a"
-        sma_str  = f"{rsi1_sma:.1f}"  if pd.notna(rsi1_sma)  else "n/a"
+        rsi_str = f"{rsi1:.1f}"     if pd.notna(rsi1)     else "n/a"
+        sma_str = f"{rsi1_sma:.1f}" if pd.notna(rsi1_sma) else "n/a"
         detail["rsi_cross"] = f"0 (no crossover — RSI={rsi_str}, SMA={sma_str})"
 
-    # ── +2: Volume > 1.5x average ──
+    # ── +2: Volume > 1.3x average ──
     vol  = last1.get("volume")
     vavg = last1.get("vol_avg")
-    if pd.notna(vol) and pd.notna(vavg) and vavg > 0 and vol > 1.5 * vavg:
+    if pd.notna(vol) and pd.notna(vavg) and vavg > 0 and vol > 1.3 * vavg:
         score += 2
-        detail["volume"] = f"+2 (vol={vol:.0f} > 1.5x avg={vavg:.0f} ✔)"
+        detail["volume"] = f"+2 (vol={vol:.0f} > 1.3x avg={vavg:.0f} ✔)"
     else:
         ratio = f"{vol/vavg:.2f}x" if (pd.notna(vol) and pd.notna(vavg) and vavg > 0) else "n/a"
-        detail["volume"] = f"0 (vol={ratio} — need >1.5x)"
+        detail["volume"] = f"0 (vol={ratio} — need >1.3x)"
 
-    # ── +2: MACD histogram flips from negative to positive ──
+    # ── +2: MACD histogram > 0 OR freshly flipped positive ──
     macd_now  = last1.get("macd_hist")
     macd_prev = prev1.get("macd_hist")
-    if pd.notna(macd_now) and pd.notna(macd_prev) and macd_prev < 0 and macd_now > 0:
+    if pd.notna(macd_now) and macd_now > 0:
         score += 2
-        detail["macd"] = f"+2 (MACD flipped: {macd_prev:.5f} → {macd_now:.5f} ✔)"
+        flip_tag = " (flipped ✔)" if (pd.notna(macd_prev) and macd_prev < 0) else " ✔"
+        detail["macd"] = f"+2 (MACD hist={macd_now:.5f}{flip_tag})"
     else:
-        now_str  = f"{macd_now:.5f}"  if pd.notna(macd_now)  else "n/a"
-        prev_str = f"{macd_prev:.5f}" if pd.notna(macd_prev) else "n/a"
-        detail["macd"] = f"0 (no flip — prev={prev_str} now={now_str})"
+        now_str = f"{macd_now:.5f}" if pd.notna(macd_now) else "n/a"
+        detail["macd"] = f"0 (MACD={now_str} — need >0)"
 
-    # ── +2: 5m RSI < 45 (macro pullback) ──
+    # ── +2: 5m RSI < 50 ──
     df5 = fetch_ohlcv(symbol, "5m", limit=50)
     if df5 is not None and len(df5) >= 20:
         df5 = add_indicators(df5)
         rsi5 = df5.iloc[-1].get("rsi")
-        if pd.notna(rsi5) and rsi5 < 45:
+        if pd.notna(rsi5) and rsi5 < 50:
             score += 2
-            detail["rsi_5m"] = f"+2 (5m RSI={rsi5:.1f} < 45 — macro pullback ✔)"
+            detail["rsi_5m"] = f"+2 (5m RSI={rsi5:.1f} < 50 ✔)"
         else:
             rsi5_str = f"{rsi5:.1f}" if pd.notna(rsi5) else "n/a"
-            detail["rsi_5m"] = f"0 (5m RSI={rsi5_str} ≥ 45)"
+            detail["rsi_5m"] = f"0 (5m RSI={rsi5_str} ≥ 50)"
     else:
         detail["rsi_5m"] = "0 (5m data not ready)"
 
-    # ── +1: BB bandwidth > 0.3% (enough volatility to hit TP) ──
+    # ── +1: BB bandwidth > 0.3% ──
     if pd.notna(bb_upper) and pd.notna(bb_middle) and bb_middle > 0:
         bandwidth = (bb_upper - bb_lower) / bb_middle
         if bandwidth > 0.003:
             score += 1
-            detail["bb_width"] = f"+1 (BB bandwidth={bandwidth*100:.2f}% > 0.3% ✔)"
+            detail["bb_width"] = f"+1 (bandwidth={bandwidth*100:.2f}% > 0.3% ✔)"
         else:
-            detail["bb_width"] = f"0 (BB bandwidth={bandwidth*100:.2f}% — too tight, <0.3%)"
+            detail["bb_width"] = f"0 (bandwidth={bandwidth*100:.2f}% — too tight)"
     else:
         detail["bb_width"] = "0 (BB width not ready)"
 
@@ -285,7 +283,7 @@ def run():
                     wallet.open_trade(coin, price, STRATEGY_NAME)
 
             if not scored:
-                print(Fore.WHITE + f"\n  No signals ≥ {MIN_SCORE}/10. Waiting for setup...")
+                print(Fore.WHITE + f"\n  No signals ≥ {MIN_SCORE}/10. Waiting...")
 
             # ── How long did the scan take? ──
             scan_elapsed = time.time() - scan_start

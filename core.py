@@ -25,12 +25,22 @@ COINS = [
 
 STARTING_BALANCE   = 135.0   # Virtual wallet in USDT
 TRADE_SIZE         = 120.0   # Capital per trade in USDT
-TAKE_PROFIT_PCT    = 0.005   # 0.5% TP
-STOP_LOSS_PCT      = 0.004   # 0.4% SL
-TRAIL_TRIGGER_PCT  = 0.003   # 0.3% — trailing stop activates here
-TRAIL_STOP_PCT     = 0.003   # trail locks in 0.3% profit floor
 FEE_PCT            = 0.001   # 0.1% per side (Binance taker)
 MAX_POSITIONS      = 1       # single position only
+
+# ── Per-mode TP/SL ──
+MOMENTUM_TP        = 0.006   # 0.6% TP for momentum mode
+MOMENTUM_SL        = 0.003   # 0.3% SL for momentum mode
+REVERSION_TP       = 0.005   # 0.5% TP for mean reversion mode
+REVERSION_SL       = 0.004   # 0.4% SL for mean reversion mode
+
+# ── Trailing stop (shared) ──
+TRAIL_TRIGGER_PCT  = 0.003   # 0.3% — trailing stop activates here
+TRAIL_STOP_PCT     = 0.003   # trail locks in 0.3% profit floor
+
+# Use these as defaults (overridden per trade via open_trade)
+TAKE_PROFIT_PCT    = REVERSION_TP
+STOP_LOSS_PCT      = REVERSION_SL
 
 LOG_FILE = "trades_log.csv"
 
@@ -75,7 +85,7 @@ class VirtualWallet:
         return (len(self.positions) < MAX_POSITIONS and
                 self.balance >= TRADE_SIZE)
 
-    def open_trade(self, coin, price, strategy):
+    def open_trade(self, coin, price, strategy, tp_pct=None, sl_pct=None):
         if not self.can_open():
             if len(self.positions) >= MAX_POSITIONS:
                 print(Fore.YELLOW + f"[WALLET] Max {MAX_POSITIONS} positions reached — skipping {coin}")
@@ -86,6 +96,9 @@ class VirtualWallet:
             print(Fore.YELLOW + f"[WALLET] Already holding {coin} — skipping")
             return False
 
+        tp_pct = tp_pct if tp_pct is not None else TAKE_PROFIT_PCT
+        sl_pct = sl_pct if sl_pct is not None else STOP_LOSS_PCT
+
         fee = TRADE_SIZE * FEE_PCT
         self.balance -= (TRADE_SIZE + fee)
         pos = {
@@ -94,11 +107,13 @@ class VirtualWallet:
             "size":            TRADE_SIZE,
             "strategy":        strategy,
             "opened_at":       datetime.now(),
-            "tp":              price * (1 + TAKE_PROFIT_PCT),
-            "sl":              price * (1 - STOP_LOSS_PCT),
-            "trail_active":    False,   # trailing stop not yet activated
-            "trail_sl":        None,    # dynamic trailing SL price
-            "peak_price":      price,   # highest price seen since entry
+            "tp":              price * (1 + tp_pct),
+            "sl":              price * (1 - sl_pct),
+            "tp_pct":          tp_pct,
+            "sl_pct":          sl_pct,
+            "trail_active":    False,
+            "trail_sl":        None,
+            "peak_price":      price,
         }
         self.positions.append(pos)
 
@@ -106,8 +121,8 @@ class VirtualWallet:
         print(Fore.GREEN + f"  ▶  BUY  {coin}  @  ${price:.4f}")
         print(f"     Strategy : {strategy}")
         print(f"     Size     : ${TRADE_SIZE:.2f}")
-        print(f"     TP       : ${pos['tp']:.4f}  (+{TAKE_PROFIT_PCT*100:.1f}%)")
-        print(f"     SL       : ${pos['sl']:.4f}  (-{STOP_LOSS_PCT*100:.1f}%)")
+        print(f"     TP       : ${pos['tp']:.4f}  (+{tp_pct*100:.1f}%)")
+        print(f"     SL       : ${pos['sl']:.4f}  (-{sl_pct*100:.1f}%)")
         print(f"     Trail    : activates at +{TRAIL_TRIGGER_PCT*100:.1f}%, locks ≥+{TRAIL_STOP_PCT*100:.1f}%")
         print(f"     Slots    : {len(self.positions)}/{MAX_POSITIONS}  |  Balance: ${self.balance:.2f}")
         print(Fore.CYAN + f"{'─'*55}\n")

@@ -2,6 +2,7 @@
 core.py — Shared engine for the virtual trading bot.
 Handles: Binance data fetching, indicator calculation,
 virtual wallet, trade logging (console + CSV).
+Also contains the Grid Bot engine (GridEngine class).
 """
 
 import ccxt
@@ -43,6 +44,16 @@ TAKE_PROFIT_PCT    = REVERSION_TP
 STOP_LOSS_PCT      = REVERSION_SL
 
 LOG_FILE = "trades_log.csv"
+
+# ─────────────────────────────────────────────
+# GRID BOT CONFIG
+# ─────────────────────────────────────────────
+GRID_LEVELS        = 8        # Total grid lines (4 buy + 4 sell)
+GRID_SPACING_PCT   = 0.004    # 0.4% between each level (covers 0.2% fees + 0.2% profit)
+CAPITAL_PER_LEVEL  = 15.0     # USDT per grid level ($15 x 8 = $120 total)
+STOP_LOSS_LEVELS   = 2        # Stop loss if price drops N levels below grid bottom
+GRID_RESET_MINS    = 60       # Rebuild grid every 60 minutes
+GRID_LOG_FILE      = "grid_trades_log.csv"
 
 # ─────────────────────────────────────────────
 # EXCHANGE SETUP
@@ -282,3 +293,189 @@ def get_current_price(symbol):
     except Exception as e:
         print(Fore.RED + f"[PRICE] Error fetching {symbol}: {e}")
         return None
+
+
+# ─────────────────────────────────────────────
+# GRID BOT HELPERS
+# ─────────────────────────────────────────────
+def calc_volatility(symbol):
+    """Returns 24h price range % as volatility measure."""
+    try:
+        raw = exchange.fetch_ohlcv(symbol, "1h", limit=24)
+        df  = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
+        if len(df) < 6:
+            return 0
+        high = df["high"].max()
+        low  = df["low"].min()
+        mid  = (high + low) / 2
+        return (high - low) / mid if mid > 0 else 0
+    except:
+        return 0
+
+
+def calc_volume_usdt(symbol):
+    """Returns average hourly USDT volume."""
+    try:
+        raw = exchange.fetch_ohlcv(symbol, "1h", limit=6)
+        df  = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
+        if len(df) < 3:
+            return 0
+        return (df["close"] * df["volume"]).mean()
+    except:
+        return 0
+
+
+def select_best_grid_coin():
+    """
+    Scans all COINS and returns (best_coin, current_price).
+    Ranks by volatility (price movement = more grid cycles)
+    confirmed by volume (liquidity for fills).
+    """
+    print(Fore.YELLOW + "\n  Scanning coins for best grid opportunity...")
+    scores = []
+    for coin in COINS:
+        vol_pct = calc_volatility(coin)
+        volume  = calc_volume_usdt(coin)
+        price   = get_current_price(coin)
+        if not price or vol_pct == 0:
+            continue
+        score = vol_pct * 100 + (min(volume, 1_000_000) / 1_000_000 * 0.5)
+        scores.append((coin, score, vol_pct, volume, price))
+        print(Fore.WHITE +
+            f"    {coin:<14}  volatility={vol_pct*100:.2f}%"
+            f"  vol=${volume:,.0f}  score={score:.3f}")
+
+    if not scores:
+        return None, None
+    scores.sort(key=lambda x: x[1], reverse=True)
+    best = scores[0]
+    print(Fore.GREEN +
+        f"\n  ★ Best grid coin: {best[0]}"
+        f"  (vol={best[2]*100:.2f}%, score={best[1]:.3f})")
+    return best[0], best[4]
+
+
+# ─────────────────────────────────────────────
+# GRID ENGINE
+# ─────────────────────────────────────────────
+class GridEngine:
+    """
+    Virtual grid trading engine.
+    Places buy/sell levels at fixed intervals around current price.
+    Profits from price oscillation — no direction prediction needed.
+
+    Math:
+      Grid spacing  : 0.4% between levels
+      Round-trip fee: 0.2% (0.1% buy + 0.1% sell)
+      Net per cycle : ~0.2% profit per completed buy→sell pair
+    """
+
+    def __init__(self, coin, center_price, balance):
+        self.coin        = coin
+        self.center      = center_price
+        self.balance     = balance
+        self.starting    = balance
+        self.created_at  = datetime.now()
+        self.total_profit = 0.0
+        self.cycles      = 0
+        self.trades      = []
+
+        self.levels = self._build_levels(center_price)
+        self.stop_loss_price = (
+            self.levels[0]["price"] * (1 - GRID_SPACING_PCT * STOP_LOSS_LEVELS)
+        )
+        self._init_log()
+
+    def _build_levels(self, center):
+        levels = []
+        n = GRID_LEVELS // 2
+        for i in range(-n, n + 1):
+            if i == 0:
+                continue
+            price   = center * (1 + i * GRID_SPACING_PCT)
+            lv_type = "buy" if i < 0 else "sell"
+            levels.append({
+                "index":     i,
+                "price":     price,
+                "type":      lv_type,
+                "state":     "watch_buy" if i < 0 else "watch_sell",
+                "coin_held": 0.0,
+            })
+        levels.sort(key=lambda x: x["price"])
+        return levels
+
+    def _init_log(self):
+        if not os.path.exists(GRID_LOG_FILE):
+            with open(GRID_LOG_FILE, "w", newline="") as f:
+                csv.writer(f).writerow([
+                    "timestamp", "coin", "action", "price",
+                    "level_index", "usdt_amount", "profit_usdt",
+                    "total_profit", "balance"
+                ])
+
+    def _log_trade(self, action, price, level_index, usdt, profit=0):
+        self.total_profit += profit
+        self.balance      += profit
+        record = [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            self.coin, action, round(price, 6),
+            level_index, round(usdt, 4),
+            round(profit, 4), round(self.total_profit, 4),
+            round(self.balance, 4)
+        ]
+        with open(GRID_LOG_FILE, "a", newline="") as f:
+            csv.writer(f).writerow(record)
+        self.trades.append(record)
+
+    def check_price(self, current_price):
+        """
+        Core grid logic: detect level crossings and simulate fills.
+        Returns list of events: ('BUY'|'SELL'|'STOP_LOSS', price, level, [profit])
+        """
+        events = []
+
+        if current_price <= self.stop_loss_price:
+            events.append(("STOP_LOSS", current_price, 0))
+            return events
+
+        for lv in self.levels:
+            # Price drops to buy level → simulate buy fill
+            if lv["state"] == "watch_buy" and current_price <= lv["price"]:
+                fee           = CAPITAL_PER_LEVEL * FEE_PCT
+                coins_got     = (CAPITAL_PER_LEVEL - fee) / lv["price"]
+                lv["coin_held"] = coins_got
+                lv["state"]     = "watch_sell"
+                self.balance   -= CAPITAL_PER_LEVEL
+                events.append(("BUY", lv["price"], lv["index"]))
+                self._log_trade("BUY", lv["price"], lv["index"], CAPITAL_PER_LEVEL)
+
+            # Price rises to sell level AND we're holding coins from a buy below
+            elif (lv["state"] == "watch_sell" and
+                  lv["coin_held"] > 0 and
+                  current_price >= lv["price"]):
+                sell_value  = lv["coin_held"] * lv["price"]
+                fee         = sell_value * FEE_PCT
+                received    = sell_value - fee
+                profit      = received - CAPITAL_PER_LEVEL
+                lv["coin_held"] = 0.0
+                # Re-arm the buy level one step below this sell level
+                buy_lv = next(
+                    (b for b in self.levels if b["index"] == lv["index"] - 1), None
+                )
+                if buy_lv:
+                    buy_lv["state"] = "watch_buy"
+                self.cycles += 1
+                events.append(("SELL", lv["price"], lv["index"], profit))
+                self._log_trade("SELL", lv["price"], lv["index"], received, profit)
+
+        return events
+
+    def needs_reset(self, current_price):
+        """True if price has moved completely outside the grid range."""
+        prices = [lv["price"] for lv in self.levels]
+        return (current_price > max(prices) * 1.002 or
+                current_price < min(prices) * 0.998)
+
+    def time_for_reset(self):
+        elapsed = (datetime.now() - self.created_at).total_seconds() / 60
+        return elapsed >= GRID_RESET_MINS
